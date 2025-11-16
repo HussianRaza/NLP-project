@@ -1,0 +1,9 @@
+streamlit==1.51.0
+transformers==4.57.1
+datasets==4.4.1
+evaluate==0.4.6
+nltk
+scikit-learn
+networkx==3.5
+pandas==2.3.3
+numpy==2.3.4
