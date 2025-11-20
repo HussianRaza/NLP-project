@@ -1,233 +1,263 @@
-import streamlit as st
+import gradio as gr
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-import os
-import sys
 
-# Set up the page with better layout
-st.set_page_config(
-    page_title="Triple NLP System for Customer Feedback", 
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+# Configuration for your specific models
+SUMMARIZER_MODEL_ID = "HussainR/t5-summarizer"
+SENTIMENT_MODEL_ID = "HussainR/t5-sentiment-analysis"
 
-# Main header - centered and clean
-st.markdown(
-    """
-    <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        color: #1f77b4;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+class ModelManager:
+    def __init__(self):
+        self.models = {}
+        self.tokenizers = {}
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Running on device: {self.device}")
 
-st.markdown('<div class="main-header">🧠 Triple NLP System for Customer Feedback</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Sentiment Analysis, Abstractive & Extractive Summarization</div>', unsafe_allow_html=True)
+    def load_model(self, model_id):
+        """Lazy loader to load models only when needed to save RAM on startup."""
+        if model_id not in self.models:
+            try:
+                print(f"Loading {model_id}...")
+                self.tokenizers[model_id] = AutoTokenizer.from_pretrained(model_id)
+                self.models[model_id] = AutoModelForSeq2SeqLM.from_pretrained(model_id).to(self.device)
+                print(f"Successfully loaded {model_id}")
+            except Exception as e:
+                return None, f"Error loading model: {str(e)}"
+        return self.models[model_id], self.tokenizers[model_id]
 
-# Try to import her extractive summarizer from helper file
-try:
-    from extractive_helper import HybridSummarizer
-    st.sidebar.success("✅ Extractive Summarization: Active (Team Code)")
-except ImportError as e:
-    st.sidebar.error("❌ Extractive Summarization: File missing")
-    st.sidebar.error(f"Error: {e}")
-
-# Check which models are available
-st.sidebar.header("🔧 System Status")
-if os.path.exists("final_sentiment_model"):
-    st.sidebar.success("✅ Sentiment Analysis: Active")
-else:
-    st.sidebar.error("❌ Sentiment Analysis: Offline")
-
-if os.path.exists("t5-summarizer_results"):
-    st.sidebar.success("✅ Abstractive Summarization: Active")
-else:
-    st.sidebar.error("❌ Abstractive Summarization: Offline")
-
-# Load ALL models
-@st.cache_resource
-def load_all_models():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    models = {}
-    
-    # Load trained sentiment model
-    if os.path.exists("final_sentiment_model"):
-        sentiment_tokenizer = AutoTokenizer.from_pretrained("final_sentiment_model")
-        sentiment_model = AutoModelForSeq2SeqLM.from_pretrained("final_sentiment_model").to(device)
-        models['sentiment'] = (sentiment_model, sentiment_tokenizer)
-    
-    # Load trained abstractive summarization model
-    if os.path.exists("t5-summarizer_results"):
-        abstractive_tokenizer = AutoTokenizer.from_pretrained("t5-summarizer_results")
-        abstractive_model = AutoModelForSeq2SeqLM.from_pretrained("t5-summarizer_results").to(device)
-        models['abstractive'] = (abstractive_model, abstractive_tokenizer)
-    
-    # Load extractive summarizer (HER CODE from helper file)
-    models['extractive'] = HybridSummarizer()
-    
-    models['device'] = device
-    return models
-
-# Load models
-with st.spinner('🔄 Initializing AI models...'):
-    models = load_all_models()
-
-# Prediction functions
-def predict_sentiment(text):
-    if 'sentiment' not in models:
-        return "Model not loaded"
-    
-    model, tokenizer = models['sentiment']
-    device = models['device']
-    
-    inputs = tokenizer(f"classify sentiment: {text}", return_tensors="pt", max_length=512, truncation=True)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_length=10, num_beams=1, early_stopping=True)
-    
-    sentiment = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return sentiment
-
-def summarize_abstractive(text):
-    if 'abstractive' not in models:
-        return "Model not loaded"
-    
-    model, tokenizer = models['abstractive']
-    device = models['device']
-    
-    inputs = tokenizer(f"summarize: {text}", return_tensors="pt", max_length=512, truncation=True)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    with torch.no_grad():
-        summary_ids = model.generate(
-            **inputs,
-            max_length=80,
-            min_length=20,
-            num_beams=2,
-            do_sample=True,
-            temperature=0.8,
-            repetition_penalty=2.0,
-            length_penalty=1.2,
-            early_stopping=True
-        )
-    
-    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    return summary
-
-def summarize_extractive(text):
-    return models['extractive'].summarize(text)
-
-# Main input area with better styling
-st.markdown("### 📝 Enter Customer Feedback")
-user_input = st.text_area(
-    "Paste or type customer feedback below:",
-    height=150,
-    placeholder="Example: I absolutely love this product! The quality is amazing, though the shipping took a bit longer than expected...",
-    label_visibility="collapsed"
-)
-
-# Analyze button
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    analyze_btn = st.button(
-        "🚀 Analyze Feedback", 
-        type="primary", 
-        use_container_width=True,
-        disabled=not user_input.strip()
-    )
-
-if analyze_btn and user_input.strip():
-    
-    with st.spinner('🤖 Analyzing with all models...'):
-        # Use all three models
-        sentiment = predict_sentiment(user_input)
-        abstractive_summary = summarize_abstractive(user_input)
-        extractive_summary = summarize_extractive(user_input)
+    def summarize(self, text):
+        if not text.strip():
+            return "Please enter some text to summarize."
         
-        # Display results in clean cards
-        st.markdown("---")
-        st.markdown("### 📊 Analysis Results")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("#### 🎯 Sentiment Analysis")
-            # Color code based on sentiment
-            if "positive" in sentiment.lower():
-                st.success(f"**Result:** {sentiment}")
-                st.markdown("**Emotion:** 😊 Positive")
-            elif "negative" in sentiment.lower():
-                st.error(f"**Result:** {sentiment}")
-                st.markdown("**Emotion:** 😠 Negative")
-            else:
-                st.warning(f"**Result:** {sentiment}")
-                st.markdown("**Emotion:** 😐 Neutral")
-            
-        with col2:
-            st.markdown("#### 📋 Abstractive Summary")
-            st.info(abstractive_summary)
-            st.caption("🤖 T5 Model - Generates new text")
-            
-        with col3:
-            st.markdown("#### 📋 Extractive Summary")
-            st.info(extractive_summary)
-            st.caption("🔍 Hybrid Model - Selects key sentences")
-        
-        # Quick stats
-        st.markdown("---")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Input Length", f"{len(user_input.split())} words")
-        with col2:
-            st.metric("Abstractive Summary", f"{len(abstractive_summary.split())} words")
-        with col3:
-            st.metric("Extractive Summary", f"{len(extractive_summary.split())} words")
-        with col4:
-            compression = max(0, 100 - (len(abstractive_summary.split()) / len(user_input.split()) * 100))
-            st.metric("Compression", f"{compression:.1f}%")
+        model, tokenizer = self.load_model(SUMMARIZER_MODEL_ID)
+        if isinstance(model, tuple): # Error caught
+            return model[1]
 
-# Footer with info
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 💡 About")
-st.sidebar.info(
-    "This system analyzes customer feedback using three advanced NLP techniques: "
-    "sentiment analysis, abstractive summarization (generates new text), and "
-    "extractive summarization (selects key sentences)."
-)
+        # T5 specific prefix for summarization
+        input_text = "summarize: " + text
+        
+        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True).to(self.device)
+        
+        with torch.no_grad():
+            summary_ids = model.generate(
+                inputs.input_ids, 
+                max_length=150, 
+                min_length=40, 
+                length_penalty=2.0, 
+                num_beams=4, 
+                early_stopping=True
+            )
+        
+        return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
-# Add some sample prompts
-st.sidebar.markdown("### 🎯 Try These Examples")
-sample_reviews = {
-    "Positive Coffee Review": "I absolutely love this coffee maker! It brews perfectly every single time and the built-in grinder makes such a difference in flavor. The programmable timer is so convenient for my morning routine. Definitely worth every penny!",
-    "Negative Restaurant Experience": "The food took over an hour to arrive and when it did, it was cold and poorly seasoned. The waiter was inattentive and never checked on us. The tables were dirty and the overall experience was terrible.",
-    "Mixed Product Feedback": "The product itself is good quality and works as described, but the shipping took much longer than expected. The packaging was damaged when it arrived, though the item inside was fine. Customer service was responsive but couldn't speed up the delivery."
+    def analyze_sentiment(self, text):
+        if not text.strip():
+            return "Please enter text to analyze."
+
+        model, tokenizer = self.load_model(SENTIMENT_MODEL_ID)
+        if isinstance(model, tuple): # Error caught
+            return model[1]
+
+        input_text = text 
+
+        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True).to(self.device)
+        
+        with torch.no_grad():
+            outputs = model.generate(inputs.input_ids)
+        
+        sentiment = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        if "positive" in sentiment.lower():
+            return f"😊 Positive ({sentiment})"
+        elif "negative" in sentiment.lower():
+            return f"😔 Negative ({sentiment})"
+        else:
+            return f"😐 {sentiment}"
+
+    def process_both(self, text):
+        """Helper to run both models on the same input."""
+        summary = self.summarize(text)
+        sentiment = self.analyze_sentiment(text)
+        return summary, sentiment
+
+# Initialize the manager
+manager = ModelManager()
+
+# --- Dark Mode Custom CSS ---
+custom_css = """
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
+
+body {
+    font-family: 'Poppins', sans-serif !important;
+    background-color: #111827 !important; /* gray-900 */
+    color: #f3f4f6 !important;
 }
 
-for name, review in sample_reviews.items():
-    if st.sidebar.button(f"📄 {name}", key=name):
-        st.session_state.user_input = review
-        st.rerun()
+.gradio-container {
+    max-width: 1100px !important;
+}
 
-# Model information
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🤖 Model Information")
-st.sidebar.info("""
-**Sentiment Analysis**: Fine-tuned FLAN-T5  
-**Abstractive Summary**: Fine-tuned T5  
-**Extractive Summary**: Hybrid TF-IDF + TextRank
-""")
+/* Header Styling */
+.header-container {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+    color: white;
+    padding: 3rem 2rem;
+    border-radius: 20px;
+    text-align: center;
+    margin-bottom: 2rem;
+    box-shadow: 0 10px 25px -5px rgba(79, 70, 229, 0.4);
+}
+
+.header-title {
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.025em;
+}
+
+.header-subtitle {
+    font-size: 1.1rem;
+    font-weight: 300;
+    opacity: 0.9;
+}
+
+/* Card Styling for Columns - Dark Mode */
+.content-card {
+    background: #1f2937; /* gray-800 */
+    padding: 25px;
+    border-radius: 16px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+    border: 1px solid #374151; /* gray-700 */
+    height: 100%;
+    color: white;
+}
+
+/* Fix for Markdown headers inside cards */
+.content-card h3 {
+    color: #f3f4f6 !important;
+    margin-bottom: 1rem;
+}
+
+/* Force input text color to white (Replaces the failed python theme argument) */
+textarea, input {
+    color: white !important;
+}
+
+/* Button Styling */
+.custom-btn {
+    background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 100%) !important;
+    border: none !important;
+    color: white !important;
+    font-weight: 600 !important;
+    padding: 12px 24px !important;
+    border-radius: 10px !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+    margin-top: 15px !important;
+    font-size: 1.1rem !important;
+}
+
+.custom-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px -10px rgba(139, 92, 246, 0.5) !important;
+}
+
+/* Footer */
+.footer-text {
+    text-align: center;
+    margin-top: 3rem;
+    color: #9ca3af;
+    font-size: 0.875rem;
+}
+"""
+
+# --- UI Construction with Dark Theme ---
+# We forcefully set the theme properties to dark colors
+theme = gr.themes.Soft(
+    primary_hue="indigo",
+    secondary_hue="violet",
+    neutral_hue="slate",
+    font=[gr.themes.GoogleFont("Poppins"), "ui-sans-serif", "system-ui", "sans-serif"],
+).set(
+    body_background_fill="#111827", # Dark background
+    block_background_fill="#1f2937", # Darker gray for blocks
+    block_border_width="0px",
+    input_background_fill="#374151", # Input fields dark gray
+    body_text_color_subdued="#9ca3af", 
+    body_text_color="#f3f4f6",
+    block_label_text_color="#e5e7eb"
+    # Removed 'input_text_color' to fix the crash. Handled via CSS above.
+)
+
+with gr.Blocks(theme=theme, css=custom_css, title="NLP Dashboard") as demo:
+    
+    # 1. Beautiful Header
+    gr.HTML("""
+        <div class="header-container">
+            <div class="header-title">NLP Intelligence Hub</div>
+            <div class="header-subtitle">Unified Sentiment Analysis & Text Summarization</div>
+        </div>
+    """)
+    
+    with gr.Row():
+        # LEFT COLUMN: Input
+        with gr.Column(scale=1, elem_classes=["content-card"]):
+            gr.Markdown("### 📝 Input Source")
+            input_text = gr.Textbox(
+                label="Text Content", 
+                placeholder="Paste your article, review, or paragraph here to begin analysis...", 
+                lines=12,
+                show_label=False,
+                container=False 
+            )
+            submit_btn = gr.Button("✨ Analyze Text", variant="primary", elem_classes=["custom-btn"])
+
+        # RIGHT COLUMN: Outputs
+        with gr.Column(scale=1, elem_classes=["content-card"]):
+            gr.Markdown("### 📊 Analysis Results")
+            
+            # Sentiment Label
+            output_sentiment = gr.Label(
+                label="Detected Sentiment",
+                num_top_classes=1,
+                scale=0
+            )
+            
+            # Summary Box
+            gr.Markdown("#### Generated Summary")
+            output_summary = gr.Textbox(
+                label="Summary", 
+                placeholder="Your summary will appear here...", 
+                lines=8,
+                interactive=False,
+                show_copy_button=True,
+                show_label=False,
+                container=False,
+                elem_id="summary-box"
+            )
+
+    # Example inputs
+    gr.Examples(
+        examples=[
+            ["The product arrived late and was damaged. I am extremely disappointed with the service and will not be ordering again. It was a terrible experience."],
+            ["I have tried several high-end headphones over the years, including Bose and Sony, but these are by far the most comfortable I have ever worn. The ear cups are soft and breathable, which is perfect for my long international flights. The noise cancellation is practically magic; it completely drowned out the engine drone on my last trip. The battery life claims 30 hours, and I actually got about 32 hours on a single charge. The only slight downside is that the app can be a bit finicky when trying to switch between devices, but once it connects, the connection is rock solid. Highly recommended for travelers!"],
+            ["I wanted to love this coffee maker because it looks beautiful on my counter, but it has been nothing but a headache. First, the carafe leaks every single time you pour a cup, no matter how slowly you do it. It makes a huge mess on the table every morning. Second, the coffee never gets hot enough; it comes out lukewarm at best. After just two weeks of use, the digital display started glitching and now it won't even turn on. I contacted customer support three days ago and still haven't heard back. Save your money and buy a different brand."],
+        ],
+        inputs=input_text
+    )
+
+    # Logic connection
+    submit_btn.click(
+        fn=manager.process_both, 
+        inputs=input_text, 
+        outputs=[output_summary, output_sentiment]
+    )
+
+    # Footer
+    gr.HTML("""
+        <div class="footer-text">
+            <p>Built using Gradio & Hugging Face Transformers | Models by HussainR</p>
+        </div>
+    """)
+
+if __name__ == "__main__":
+    demo.launch()
